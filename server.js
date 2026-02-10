@@ -82,17 +82,14 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Share link resolver (public)
-app.get('/s/:id', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'share.html'));
+// Root — API info
+app.get('/', (req, res) => {
+  res.json({ name: 'WARDKEY API', version: '1.0.0', status: 'ok' });
 });
 
-// SPA fallback
+// Catch-all for unknown routes
 app.get('*', (req, res) => {
-  if (req.path.startsWith('/api/')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.status(404).json({ error: 'Not found' });
 });
 
 // ═══════ ERROR HANDLER ═══════
