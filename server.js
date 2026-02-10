@@ -25,8 +25,16 @@ app.use(helmet({
   contentSecurityPolicy: false // Disabled — this is a JSON API, CSP only applies to document responses
 }));
 
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+// Also allow www variants automatically
+const allOrigins = [...new Set(allowedOrigins.flatMap(o => {
+  const u = new URL(o);
+  return u.hostname.startsWith('www.')
+    ? [o, o.replace('://www.', '://')]
+    : [o, o.replace('://', '://www.')];
+}))];
 app.use(cors({
-  origin: (process.env.ALLOWED_ORIGINS || '').split(','),
+  origin: allOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization']
