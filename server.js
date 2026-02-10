@@ -1,0 +1,120 @@
+// WARDKEY Server — v1.0.0
+require('dotenv').config();
+const express = require('express');
+const helmet = require('helmet');
+const cors = require('cors');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const path = require('path');
+const fs = require('fs');
+
+const authRoutes = require('./routes/auth');
+const vaultRoutes = require('./routes/vault');
+const shareRoutes = require('./routes/share');
+const aliasRoutes = require('./routes/aliases');
+const { initDB } = require('./models/db');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ═══════ SECURITY ═══════
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'", "https://api.anthropic.com"]
+    }
+  }
+}));
+
+app.use(cors({
+  origin: (process.env.ALLOWED_ORIGINS || '').split(','),
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// ═══════ RATE LIMITING ═══════
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+  max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
+  message: { error: 'Too many requests. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use('/api/', limiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many auth attempts. Please try again in 15 minutes.' }
+});
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+
+// ═══════ MIDDLEWARE ═══════
+app.use(express.json({ limit: '10mb' }));
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// ═══════ STATIC FILES ═══════
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ═══════ API ROUTES ═══════
+app.use('/api/auth', authRoutes);
+app.use('/api/vault', vaultRoutes);
+app.use('/api/share', shareRoutes);
+app.use('/api/aliases', aliasRoutes);
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    version: '1.0.0',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Share link resolver (public)
+app.get('/s/:id', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'share.html'));
+});
+
+// SPA fallback
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ═══════ ERROR HANDLER ═══════
+app.use((err, req, res, next) => {
+  console.error('Server error:', err.message);
+  res.status(err.status || 500).json({
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
+  });
+});
+
+// ═══════ START ═══════
+// Ensure data directory exists
+const dataDir = path.dirname(process.env.DB_PATH || './data/wardkey.db');
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
+initDB();
+
+app.listen(PORT, () => {
+  console.log(`
+  ╔══════════════════════════════════════╗
+  ║     🔐 WARDKEY Server v1.0.0        ║
+  ║     Port: ${String(PORT).padEnd(27)}║
+  ║     Mode: ${(process.env.NODE_ENV || 'dev').padEnd(27)}║
+  ╚══════════════════════════════════════╝
+  `);
+});
+
+module.exports = app;
