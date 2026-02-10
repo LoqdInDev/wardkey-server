@@ -17,6 +17,9 @@ const { initDB } = require('./models/db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Trust proxy (required for Railway/Render reverse proxy)
+app.set('trust proxy', 1);
+
 // ═══════ SECURITY ═══════
 app.use(helmet({
   contentSecurityPolicy: {
