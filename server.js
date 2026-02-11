@@ -71,6 +71,20 @@ app.use('/api/vault', vaultRoutes);
 app.use('/api/share', shareRoutes);
 app.use('/api/aliases', aliasRoutes);
 
+// Temporary admin cleanup — REMOVE AFTER USE
+app.delete('/api/admin/cleanup-user/:email', (req, res) => {
+  const secret = req.headers['x-admin-key'];
+  if (secret !== 'wardkey-temp-cleanup-2026') return res.status(403).json({ error: 'Forbidden' });
+  const db = require('./models/db').getDB();
+  const email = decodeURIComponent(req.params.email).toLowerCase();
+  const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  if (!user) return res.json({ message: 'User not found', email });
+  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+  db.prepare('DELETE FROM vaults WHERE user_id = ?').run(user.id);
+  db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
+  res.json({ message: 'User deleted', email });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({
