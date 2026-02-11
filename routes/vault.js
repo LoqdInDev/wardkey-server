@@ -8,50 +8,50 @@ const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
 // ═══════ GET VAULT ═══════
-// Download encrypted vault blob
+// Download encrypted vault blob (v4 format)
 router.get('/', authenticate, (req, res) => {
   const db = getDB();
-  const vault = db.prepare('SELECT id, encrypted_data, iv, salt, version, updated_at FROM vaults WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1').get(req.user.id);
+  const vault = db.prepare('SELECT id, encrypted_data, version, updated_at FROM vaults WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1').get(req.user.id);
 
   if (!vault) {
     return res.json({ vault: null, message: 'No vault found. Upload to create one.' });
   }
 
-  res.json({
-    vault: {
-      id: vault.id,
-      data: vault.encrypted_data,
-      iv: vault.iv,
-      salt: vault.salt,
-      version: vault.version,
-      updatedAt: vault.updated_at
-    }
-  });
+  try {
+    const parsed = JSON.parse(vault.encrypted_data);
+    res.json({ vault: parsed });
+  } catch {
+    res.json({ vault: null, message: 'Vault data corrupted.' });
+  }
 });
 
 // ═══════ SYNC VAULT ═══════
-// Upload encrypted vault blob (full replace)
+// Upload encrypted vault blob (v4 format — full replace)
 router.put('/', authenticate, (req, res) => {
-  const { data, iv, salt, version, deviceId } = req.body;
-  if (!data || !iv || !salt) {
-    return res.status(400).json({ error: 'Missing encrypted data, iv, or salt' });
+  const body = req.body;
+  if (!body.data || !body.salt) {
+    return res.status(400).json({ error: 'Missing encrypted data or salt' });
   }
+
+  const blob = JSON.stringify(body);
+  const deviceId = body.deviceId;
 
   const db = getDB();
   const existing = db.prepare('SELECT id, version FROM vaults WHERE user_id = ?').get(req.user.id);
 
   // Conflict detection
-  if (existing && version && existing.version > version) {
+  const clientVersion = body.version || body.v || 0;
+  if (existing && clientVersion && existing.version > clientVersion) {
     return res.status(409).json({
       error: 'Conflict: server has newer version',
       serverVersion: existing.version,
-      clientVersion: version
+      clientVersion
     });
   }
 
   const id = existing?.id || uuid();
   const newVersion = (existing?.version || 0) + 1;
-  const sizeBytes = Buffer.byteLength(data, 'utf8');
+  const sizeBytes = Buffer.byteLength(blob, 'utf8');
 
   // Check plan limits (10MB free, 1GB pro)
   const user = db.prepare('SELECT plan FROM users WHERE id = ?').get(req.user.id);
@@ -60,12 +60,16 @@ router.put('/', authenticate, (req, res) => {
     return res.status(413).json({ error: 'Vault exceeds plan storage limit', maxBytes: maxSize });
   }
 
+  // Extract salt for DB column (NOT NULL constraint), iv stored inside blob
+  const saltStr = JSON.stringify(body.salt || []);
+  const ivStr = body.data?.iv ? JSON.stringify(body.data.iv) : '[]';
+
   if (existing) {
     db.prepare('UPDATE vaults SET encrypted_data = ?, iv = ?, salt = ?, version = ?, updated_at = CURRENT_TIMESTAMP, size_bytes = ? WHERE id = ?')
-      .run(data, iv, salt, newVersion, sizeBytes, id);
+      .run(blob, ivStr, saltStr, newVersion, sizeBytes, id);
   } else {
     db.prepare('INSERT INTO vaults (id, user_id, encrypted_data, iv, salt, version, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, req.user.id, data, iv, salt, newVersion, sizeBytes);
+      .run(id, req.user.id, blob, ivStr, saltStr, newVersion, sizeBytes);
   }
 
   // Log sync
