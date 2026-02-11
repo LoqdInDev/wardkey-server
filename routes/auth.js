@@ -8,8 +8,40 @@ const QRCode = require('qrcode');
 const { getDB } = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 
+const crypto = require('crypto');
+
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+if (!process.env.JWT_SECRET) {
+  throw new Error('FATAL: JWT_SECRET environment variable is required. Set it before starting the server.');
+}
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// ═══════ MFA SECRET ENCRYPTION ═══════
+// Encrypt MFA secrets at rest using AES-256-GCM with a key derived from JWT_SECRET
+const MFA_ENC_KEY = crypto.createHash('sha256').update(JWT_SECRET + ':mfa-encryption-key').digest();
+
+function encryptMfaSecret(plaintext) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', MFA_ENC_KEY, iv);
+  let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const tag = cipher.getAuthTag().toString('hex');
+  return iv.toString('hex') + ':' + tag + ':' + encrypted;
+}
+
+function decryptMfaSecret(ciphertext) {
+  // Handle legacy plaintext secrets (no colons = not encrypted)
+  if (!ciphertext.includes(':')) return ciphertext;
+  const [ivHex, tagHex, encrypted] = ciphertext.split(':');
+  if (!ivHex || !tagHex || !encrypted) return ciphertext; // malformed, treat as plaintext
+  const iv = Buffer.from(ivHex, 'hex');
+  const tag = Buffer.from(tagHex, 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', MFA_ENC_KEY, iv);
+  decipher.setAuthTag(tag);
+  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
 const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || '7d';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
 
@@ -93,8 +125,8 @@ router.post('/2fa/setup', authenticate, async (req, res) => {
     const otpauthUri = authenticator.keyuri(user.email, 'WARDKEY', secret);
     const qrDataUri = await QRCode.toDataURL(otpauthUri);
 
-    // Store secret but keep mfa_enabled=0 until confirmed
-    db.prepare('UPDATE users SET mfa_secret = ? WHERE id = ?').run(secret, req.user.id);
+    // Store secret encrypted, keep mfa_enabled=0 until confirmed
+    db.prepare('UPDATE users SET mfa_secret = ? WHERE id = ?').run(encryptMfaSecret(secret), req.user.id);
 
     res.json({ secret, qrDataUri });
   } catch (err) {
@@ -112,7 +144,8 @@ router.post('/2fa/confirm', authenticate, async (req, res) => {
     const user = db.prepare('SELECT mfa_secret FROM users WHERE id = ?').get(req.user.id);
     if (!user || !user.mfa_secret) return res.status(400).json({ error: '2FA not set up — call /2fa/setup first' });
 
-    const isValid = authenticator.check(totpCode, user.mfa_secret);
+    const decryptedSecret = decryptMfaSecret(user.mfa_secret);
+    const isValid = authenticator.check(totpCode, decryptedSecret);
     if (!isValid) return res.status(400).json({ error: 'Invalid code — please try again' });
 
     db.prepare('UPDATE users SET mfa_enabled = 1 WHERE id = ?').run(req.user.id);
@@ -130,7 +163,7 @@ router.post('/2fa/verify-login', async (req, res) => {
 
     let decoded;
     try {
-      decoded = jwt.verify(tempToken, JWT_SECRET);
+      decoded = jwt.verify(tempToken, JWT_SECRET, { algorithms: ['HS256'] });
     } catch (err) {
       return res.status(401).json({ error: 'Token expired or invalid — please log in again' });
     }
@@ -143,7 +176,8 @@ router.post('/2fa/verify-login', async (req, res) => {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
     if (!user || !user.mfa_secret) return res.status(401).json({ error: 'Invalid user or 2FA not configured' });
 
-    const isValid = authenticator.check(totpCode, user.mfa_secret);
+    const decryptedSecret = decryptMfaSecret(user.mfa_secret);
+    const isValid = authenticator.check(totpCode, decryptedSecret);
     if (!isValid) return res.status(401).json({ error: 'Invalid 2FA code' });
 
     // Issue full token and create session
@@ -173,7 +207,8 @@ router.post('/2fa/disable', authenticate, async (req, res) => {
     const user = db.prepare('SELECT mfa_secret, mfa_enabled FROM users WHERE id = ?').get(req.user.id);
     if (!user || !user.mfa_enabled) return res.status(400).json({ error: '2FA is not enabled' });
 
-    const isValid = authenticator.check(totpCode, user.mfa_secret);
+    const decryptedSecret = decryptMfaSecret(user.mfa_secret);
+    const isValid = authenticator.check(totpCode, decryptedSecret);
     if (!isValid) return res.status(400).json({ error: 'Invalid code — please try again' });
 
     db.prepare('UPDATE users SET mfa_enabled = 0, mfa_secret = NULL WHERE id = ?').run(req.user.id);

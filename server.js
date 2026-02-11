@@ -1,5 +1,13 @@
 // WARDKEY Server — v1.0.0
 require('dotenv').config();
+
+// ═══════ STARTUP CHECKS ═══════
+if (!process.env.JWT_SECRET) {
+  console.error('\n  ❌ FATAL: JWT_SECRET environment variable is required.');
+  console.error('  Set it in your .env file or environment before starting the server.\n');
+  process.exit(1);
+}
+
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
